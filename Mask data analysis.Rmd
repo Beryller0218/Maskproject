@@ -1,0 +1,586 @@
+---
+title: "sta490 Mask Porject Data analysis"
+author: "Yingshi Wang"
+date: "03/02/2021"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+library(foreign)
+library(lme4)
+library(psy)
+library(nFactors)
+library(INLA)
+library(dplyr)
+#devtools::install_github("julianfaraway/brinla")
+library(brinla)
+library(ggplot2)
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+library(ggregplot)
+library(coda)
+library(MCMCglmm)
+library(tidyverse) #for data cleaning, glimpse subseting
+library(ggplot2) #for plotting
+library(psych) #for scatterplot matrix
+library(knitr) #for kable, better charts
+library(sf) #loading shp file
+library(leaflet) #for spatial plotting
+library(RColorBrewer) #for plotting heat map
+library(spdep) #creating spatial neighbourhood matrix
+library(sp) #convert dataframe to spatial polygon object
+library(CARBayes) #for spatial modelling
+library(hash) # use for hash() function
+```
+
+```{r,echo=F}
+data <- read.csv("masks_data_v1.csv") 
+#full.data <- foreign::read.dta("meo_pooled_sharable.dta")
+#which(colnames(data)=="Q84")
+data <- data[c(4971:43272),c(5,6,9:14,40,43,47,92,106,112:113,116, 107:110,118,144,145,158:160,117)]
+#colnames(data)[c(5,6,9:14,40,45,47,92,106,112:113,116, 107:110,118,144,158:160,117)] 
+```
+
+# Abstract
+Since year 2020, COVID-19 affects different people in different ways. Most infected people will develop mild to moderate illness and recover without hospitalization. Wearing a mask is one of the significant action to prevent being infected, and it is also a heated policy issue during COVID-19 pandemic. We evaluate the situation of wearing of a face mask in Canada. And mainly focusing on two research questions:  who is most likely to wear a mask and where people wearing ask is the most common. An generalized linear mixed model was used to solve for the first research question by combining the information of socio-demographic and attitudinal information. On the other hand, we use spatial model attempting to find out where people wearing mask is the most common. We found out the answers after modeling. Female and people with older age are more likely to wearing a mask, people have higher confidence and trust in media and government are more likely to wearing a mask. We also found out people living in eastern area, such as Toronto, are more likely to wearing a mask during coronavirus pandemic, and people living in western area in Canada,such as Vancouver,are less likely to wear a mask. Since there are unequal number of respondents among provinces were collected, the research could be improve by increasing the sample size in each province. 
+
+
+# 1. Introducion
+This research is promoted by the project collaborator and is conducted under the instruction of STA490 in UofT. The report aims at analyzing and exploring the effectiveness of factors on mask uptake. As we know, the virus that causes COVID-19 can be spread by such things as coughing, sneezing, or even speaking at a close range. Using a mask is significant to limit the spread of COVID-19 as we return to our usual activities. We investigated who is most likely to wear a mask and where people wearing ask is the most common(first two research questions). Our data given by Policy, Elections, and Representation Lab(Pearl), is one of the largest survey data sets of Canadians' attitudes and behaviors around COVID-19 with 43272 observations. The data consists of 18 discrete, weekly surveys("wave") from Mar 25th to Aug 31st. I used 27 variables from the original dataset, including response id, wave number, age, gender, province, FSA, education level, etc. In this report, two models were used to implement the objectives, the Generalized linear mixed model and the Spatial model. The report contains the following sections: a method section describing the implementation steps of both data cleaning and model building, a 'result & discussion' session discussing the main findings of model results, a conclusion section summarizing the implications of the entire statistical analysis and commenting some limitations of this research.
+
+# 2. Method
+We inspect the first rows of `data`. `data` contains the 27 variables with missing values. I will demonstrate the meaning of each variable clearly in the `variable section` section after `data cleaning`. The `Method` section is discussed in multiple sub-sections which would be easier for you to follow.  
+
+```{r,echo=F}
+head(data)
+```
+## 2.1 Data cleaning
+In the stage of data cleaning, I've done the following steps:
+
+• Checking data consistency
+
+  Since there are some questions appeared only after a certain wave, so I implement the checking step using `dplyr` package. After checking, variables `Q10_12` and `Q140`started appearing only in wave 3, so I deleted the first data on first two waves to ensure the completeness of data and there is no need to do missing value imputation because we have enough data. There are 38302 observations left after deleting the first two waves. 
+  
+```{r,echo=F}
+#Q140 starts from wave3
+#Q10_12 starts appearing in wave 3
+#colnames(data)[7] 
+consistency_checking <- data %>% 
+  group_by(wave) %>% 
+  count(Q140)
+```
+
+• Checking missing values and their imputation
+
+  As seeing from the following table, there are 3 missing values from `age`, 17409 missing values from `Q10_12` and 3697 observations missing from `income`. 
+  
+  In our survey question,question 10 is asking "Over the past week, which of the following actions have you taken as a result of the coronavirus pandemic?", and `Q10_12` representing 'worn a mask' is one of the options of this question. Therefore I consider all `NA` in `Q10_12` as `Not Worn a mask` and replace them as 0 values. Noted that `Q10_12` is also our binary response variable. 
+  
+  For missing values in `income`, I replace all `NA` to 9 which represents the 9th options(`prefer not to answer`) in question 9, then I change all 9s to 0s in order to have an increasing order of income level in `income`, e.g. 0- prefer not to answer, 1- no income, 2- one dollar to 30,000 dollars ... 8- More than 200,00 dollars.
+  
+  The last step I did is to delete all missing values from `age` sine it only has 3 missing values. Moreover, I also deleted all 12 in Q79(education) and all 7 in Q84(marriage status) from data because they are meaningless to our investigation and there are only total $113+317=430$ of them.
+
+```{r,echo=F}
+sapply(data, function(x) sum(is.na(x)))
+```
+
+```{r,echo=F}
+#replace all NA in Q10_12 with 0
+data$Q10_12[is.na(data$Q10_12)] <- 0
+#replace all NA in income with 9:prefer not to answer
+data$income[is.na(data$income)] <- 9
+ # move 'prefer not to answer' from option 9 to option 0 so that the option having an increasing order
+data$income[data$income == 9] <- 0
+#remove 3 row containing NA in age
+data <- na.omit(data)
+```
+
+```{r,echo=F}
+#deleting '12 - Don't know' options in education, total 113 observations.
+data<-data[!(data$Q79=="12"),]
+#deleting '7 - Don't know' options in Q84, total 317 observations.
+data <- data[!(data$Q84 =="7"),]
+```
+
+• Rename variables
+
+For demonstration purpose, I rename `Q4`,`Q5`,`Q84`,`Q12`,`Q79`,`Q78`,`Q10_12` to `Gender`,`province`, `marriage`,`jobatrisk`,`education`, `citysize` and `mask` respectively. In addition, I change the values 1 to 10 in `province` to their corresponding province name. E.g. I replace 1 to "Newfoundland and Labrador", and replace 2 to "Prince Edward Island". 
+
+
+```{r,echo=F}
+# rename variables
+data <- data %>% 
+  rename(
+    Gender = Q4 ,province = Q5, marriage = Q84, jobatrisk = Q12,education =,citysize=Q78,mask =Q10_12)
+#rename province
+data$province[data$province == 1] <- "Newfoundland and Labrador"
+data$province[data$province == 2] <- "Prince Edward Island"
+data$province[data$province == 3] <- "New Brunswick"
+data$province[data$province == 4] <- "Nova Scotia"
+data$province[data$province == 5] <- "Quebec"
+data$province[data$province == 6] <- "Ontario"
+data$province[data$province == 7] <- "Manitoba"
+data$province[data$province == 8] <- "Saskatchewan"
+data$province[data$province == 9] <- "Alberta"
+data$province[data$province == 10] <- "BC"
+
+```
+
+## 2.2 Variable selection
+
+For our first research question "Who is most likely to report using a mask", we are interested in socio-demographic and attitudinal predictors of mask-wearing. We first choose socio-demographic predictors of mask-wearing according to the information got from Explanatory data analysis, and the socio-demographic variables are age, gender, province, education level, income, marital status, and city size. `Q10_12` is our response variable which is a binary variable representing 0 and 1, where 0 is not wearing the mask and 1 is wearing a mask. We also use a factor analysis to decide the attitudinal predictors of mask-wearing. Then we put the rest of the "attitudinal-like" variables into factor analysis using package `stats`.
+
+"Attitudinal-like" variables:
+
+  - Q25 What is your primary source for news on the coronavirus pandemic?
+  
+  - Q26 How often have you read, listened to, or watched news related to the coronavirus pandemic over the past week?
+  
+  - Q27 In general, how much trust and confidence do you have in the mass media when it comes to reporting the news fully, accurately, and fairly?
+  
+  - Q28 How accurate, do you think, is the news posted online by news organizations?
+  
+  - Q7 How concerned are you about the coronavirus pandemic?
+  
+  - Q73 How serious of a threat do you think the coronavirus (COVID-19) is to Canadians?
+  
+  - Q33 Over the past week, how often did you discuss the coronavirus pandemic with friends, family, and acquaintances?
+  
+  - Q34 Over the past week, how often did you have online discussion about the coronavirus pandemic?
+  
+  - Q55 In federal politics, do you usually think of yourself as a(n)...
+  
+  - Q65 To what extent do you approve or disapprove of your local government's handling of the coronavirus pandemic so far?
+  
+  - Q64 To what extent do you approve or disapprove of your provincial government's handling of the coronavirus pandemic so far?
+  
+  - Q63 To what extent do you approve or disapprove of the federal government's handling of the coronavirus pandemic so far?
+  
+
+```{r,echo=F}
+subset <- data[,c(7,8,14:20,24:26)]
+subset <- subset %>% 
+  rename(concern=Q7,threat=Q73,disc_wfri =Q33,onlinedisc = Q34,pparty =Q55,cfreq1 = Q25,cfreq2 = Q26,confimedia=Q27,accurmedia=Q28,localgovt=Q65,provgovt=Q64,fedgovt=Q63)
+fit <- factanal(subset, 5, scores = c("regression"), rotation = "varimax")
+fit$loadings
+```
+
+```{r,echo=F}
+par(mfrow=c(1,2))
+load <- fit$loadings[,1:2]
+plot(load, type='n')
+text(load,labels=names(subset),cex=.7)
+scree.plot(fit$correlation)
+```
+
+As we see from the above result table and plot of factor analysis on the right hand side, `localgovt`,`provgovt` and `fedgovt` have relative big loadings (0.798,0.760 and 0.566 relatively) in Factor 1 where Factor 1 is the most important factor. `concern` and `threat` have a very high loadings in factor 2 with 0.728 and 0.825. `confimedia` and `accurmedia` have higher loadings in Factor 3. `disc_wfri`,`onlinedisc` and `cfreq2` have relative higher loadings around 0.6, and `cfreq2` have a lower loading on factor 4 than the other two variables. This suggests that `cfreq2` is less related to the discussion topic.
+
+  The next step is to determine the number of factors to extract. I use the Cattell scree plot which plots the components as the X-axis and the corresponding eigenvalues as the Y-axis. From the above scree plot (on the left hand side), we're seeing that the eigenvalues drop as one move to the right, towards later components. Then we see the eigenvalues of each component starting to less than 1 gradually. Cattell's scree test says to drop all further components after the one starting the elbow. Therefore we are only considering factors 1 to 4 from the table.
+
+For factor 1, I add `localgovt`,`provgovt` and `fedgovt` together as one variable `trustgovt` with range from 3 to 25.Higher value in `trustgovt` means lower trust in government's handling of the coronavirus pandemic. 
+
+For factor 2, I simply add `concern` and `threat` together as variable `concerns`, where lower vlaues means individuals are more concerned about the coronavirus pandemic. 
+
+For factor 3, I add `confimedia` and `accurmedia` togther as new variable `trustmedia` which showing people have more trust and confidence in media if there is a lower value in `trustmedia`. 
+
+For factor 4, I add `disc_wfri` and `onlinedisc` togther as a attitudinal predictor `discuss`, showing lower values in `discuss` means people are more likely to discuss the coronavirus pandemic with other people.  
+
+```{r,echo=F}
+# Create factor 1: Q63+Q64+Q65
+
+data$Q63 <- as.numeric(data$Q63)
+data$Q64 <- as.numeric(data$Q64)
+data$Q65 <- as.numeric(data$Q65)
+data$trustgovt <- data$Q63+data$Q64+data$Q65
+```
+
+```{r,echo=F}
+# Create factor 2: Q7+Q73
+
+data$Q7 <- as.numeric(data$Q7)
+data$Q73 <- as.numeric(data$Q73)
+data$concerns <- data$Q7+data$Q73
+```
+
+```{r,echo=F}
+# Create factor 3: Q27+Q28
+
+data$Q27 <- as.numeric(data$Q27)
+data$Q28 <- as.numeric(data$Q28)
+data$trustmedia <- data$Q27+data$Q28
+```
+
+```{r,echo=F}
+# Create factor 4: Q33+Q34
+
+data$Q33 <- as.numeric(data$Q33)
+data$Q34 <- as.numeric(data$Q34)
+data$discuss <- data$Q33+data$Q34
+```
+
+## 2.3 Model selection and its assumption
+
+### GLMM 2.3.1
+#### For Research question 1: Who is most likely to report using the mask
+
+In the stage of data analysis, I first addressed the research question. As our data is a multilevel dataset because respondents are nested within provinces, which in turn are nested within regions. So I considered province as our the random effect of the generalized linear mixed model because respondents are nested with provinces as well as we believe that the severity of Covid-19 spread is different among provinces and number of people wearing mask would also differ. Therefore, respondents would be in the first level of the model and provinces would be in the second level of our model. The following equation is our model equation.
+
+$$logit(\pi_{i}) = \beta_{i}X_{i} + U_i +\epsilon_{i}\\where \ i = 1,...,10\\U_i \sim  N(0, \tau_u)\\ \epsilon_{i} \sim i.i.d \ N(0, \Sigma)$$
+Noted that $n_j$ represents the number of respondents in province j.
+
+The model assumptions are shown as following:
+
+- The outcome is a binary or dichotomous variable like yes vs no, positive vs negative, 1 vs 0.
+
+- There is a linear relationship between the logit of the outcome and each predictor variables. 
+
+- There is no influential values (extreme values or outliers) in the continuous predictors
+
+- There is no high intercorrelations (i.e. multicollinearity) among the predictors.
+
+### Spatial model 2.4
+**Where is masking wearing most common**
+
+**2.4.1 Data preparation**
+
+In this section, we investigate in the second research question and examined mask uptake situation over entire Canada in depth and plotted the observed the count of people wearing a mask in each province, expected rate of people wearing a mask for each province. Spatial Areal Unit Modeling with Conditional Autoregressive Priors is our analysis tool because we having a binary response variable, and we eliminated those socio-demographic predictors in order to keep the simplicity of the model. The model was constructed by first creating an adjacency 13*13 matrix W, where 13 is the number of provinces in Canada so that we have 13 areas. A binary specification for W matrix is based on geographical contiguity, and $W_{kj} = 1$ if areal units $(S_k,S_j)$ sharing a common border, and is zero otherwise. Next we consider 
+
+
+```{r,echo=F}
+# STEP1: Creating dataset containing: province, cases, population, gender, concerns, jobatrisk.(Not including 'province' because there are only 10 provinces and lacks of 3 territories)
+spatdata <- data[,c(5,6,7,9,4,10)]
+# colnames(data)[c(5,6,7,9,4,10)] 
+# which(colnames(data)=="Q7")
+```
+
+```{r,echo=F}
+#redefine Q7 to concern level
+colnames(spatdata)[3] <- "CONCERN"
+# spatdata %>% 
+#   group_by(CONCERN) %>%
+#   count()
+spatdata$CONCERN[spatdata$CONCERN == '1'] <- 'very concerned'
+spatdata$CONCERN[spatdata$CONCERN == '2'] <- 'somewhat concerned'
+spatdata$CONCERN[spatdata$CONCERN == '3'] <- 'a little'
+spatdata$CONCERN[spatdata$CONCERN == '4'] <- 'Not at all'
+```
+
+```{r,echo=F}
+#recode FSA: convert FSA to city names
+postal_to_province = hash()
+postal_to_province[["A"]] = "Newfoundland and Labrador"
+postal_to_province[["B"]] = "Nova Scotia"
+postal_to_province[["C"]] = "Prince Edward Island"
+postal_to_province[["E"]] = "New Brunswick"
+postal_to_province[["G"]] = "Québec"
+postal_to_province[["H"]] = "Québec"
+postal_to_province[["J"]] = "Québec"
+postal_to_province[["K"]] = "Ontario"
+postal_to_province[["L"]] = "Ontario"
+postal_to_province[["M"]] = "Ontario"
+postal_to_province[["N"]] = "Ontario"
+postal_to_province[["P"]] = "Ontario"
+postal_to_province[["R"]] = "Manitoba"
+postal_to_province[["S"]] = "Saskatchewan"
+postal_to_province[["T"]] = "Alberta"
+postal_to_province[["V"]] = "BC"
+postal_to_province[["X"]] = "Northwest Territories and Nunavut"
+postal_to_province[["Y"]] ="Yukon"
+
+provinces <- c()
+convert_to_province <- function(FSA, postal_to_province){
+  for (i in 1:length(FSA)) {
+    first_char = substr(FSA[i],1, 1)
+    province = postal_to_province[[first_char]]
+    provinces <- c(provinces,province)}
+  provinces
+  }
+spatdata$provinces <- convert_to_province(spatdata$FSA, postal_to_province)
+countNTN <- spatdata %>% 
+  count(provinces == 'Northwest Territories and Nunavut') # there are 10 counts and want to equally seperate 'Northwest Territories' and 'Nunavut'.
+
+#which(spatdata == 'Northwest Territories and Nunavut', arr.ind=T)
+spatdata$provinces[c(3740,14050,17761,21441,26999)] <- 'Northwest Territories'
+spatdata$provinces[c(4828,10143,24756,23694,33218)] <- 'Nunavuts'
+```
+
+```{r,echo=F}
+#redefine Gender
+spatdata$Gender[spatdata$Gender == '1'] <- 'm'
+spatdata$Gender[spatdata$Gender == '2'] <- 'f'
+spatdata$Gender[spatdata$Gender == '3'] <- 'o'
+spatdata$jobatrisk[spatdata$jobatrisk == '1'] <- 'yes'
+spatdata$jobatrisk[spatdata$jobatrisk == '2'] <- 'yes'
+spatdata$jobatrisk[spatdata$jobatrisk == '3'] <- 'no'
+spatdata$jobatrisk[spatdata$jobatrisk == '4'] <- 'no'
+```
+
+
+```{r,echo=F}
+# for expected E calculation using dis
+library(dplyr)
+#full fill all possible combinations of variables, total 624 cases
+t1 = spatdata %>% distinct(Gender)
+t2 = spatdata %>% distinct(CONCERN)
+t3 = spatdata %>% distinct(jobatrisk)
+t4 = spatdata %>% distinct(provinces)
+t5 = spatdata %>% distinct(mask)
+t1$FAKE = 1
+t2$FAKE = 1
+t3$FAKE = 1
+t4$FAKE = 1
+t5$FAKE = 1
+t6 = full_join(full_join(full_join(full_join(t1,t2,all=TRUE, by = "FAKE"),t3,by="FAKE"),t4,by="FAKE"),t5,by="FAKE")%>%dplyr::select(-FAKE)
+spat0 <- spatdata %>%
+  group_by(provinces,mask,Gender,jobatrisk, CONCERN) %>%
+  count()
+jointbl = merge(x=t6,y=spat0,by=c("provinces","Gender","jobatrisk","CONCERN","mask"),all.x=TRUE)
+jointbl$n[is.na(jointbl$n)] <- 0
+#filter mask = 1 to get the table
+tbl <- jointbl %>%
+  group_by(provinces,mask,Gender,jobatrisk, CONCERN) %>%
+  filter(mask == 1)
+#merge tbl and tbl2 to add a population column into tbl, named "df"
+tbl2 <- spatdata %>%
+  group_by(provinces,Gender,jobatrisk, CONCERN) %>%
+  count()
+df = merge(x=tbl,y=tbl2,by=c("provinces","Gender","jobatrisk","CONCERN"),all.x=TRUE)
+df$n.y[is.na(df$n.y)] <- 0
+names(df)[names(df) == "n.x"] <- "masknum"
+names(df)[names(df) == "n.y"] <- "population"
+head(df)
+```
+
+Then I calculated Standardized Mask Ratio(SMR) to estimate the situation of make wearing, where 
+$$SMR \ in\ province\ i = SMR_i = \frac{Y_i}{E_i}=\frac{num\ of\ observed \ cases\ in \ province\ i}{num\ of\ expected \ cases\ in \ province\ i}$$
+If $SMR_i = 1$, number of observed cases in $province_i$ = number of expected cases in $province_i$.
+
+If $SMR_i > 1$, number of observed cases in $province_i$ > number of expected cases in $province_i$, which means people in $province_i$ having relative less risk exposed to COVID-19,regardingless other factors.
+
+If $SMR_i < 1$, number of observed cases in $province_i$ < number of expected cases in $province_i$, which means people in $province_i$ having relative higher risk exposed to COVID-19,regardingless other factors. 
+
+And I calculated the expected number of people wearing mask in $province_i$ using e`xpected()` function in `SpatialEpi` package. The final table is shown below. 
+
+```{r,echo=F}
+#STEP2: Observed cases wearing mask
+d <- group_by(df, provinces) %>% summarize(Y = sum(masknum))
+```
+
+```{r,echo=F}
+library(SpatialEpi) # for expected() function
+#STEP3: expected cases
+df <- df[order(df$provinces,df$Gender,df$jobatrisk,df$CONCERN),]
+E <- expected(population = df$population, cases = df$masknum, n.strata = 24)
+d$E <- E
+```
+
+```{r,echo=F}
+#Calculating SMR(standardized mask ratio)
+d$SMR <- d$Y/d$E
+head(d)
+```
+
+#### 2.4.2 Map
+
+I imported map of Canada from [`Statistics Canada`](https://www12.statcan.gc.ca/census-recensement/2011/geo/bound-limit/bound-limit-2011-eng.cfm), and use it along with the above constructed data frame to create a `SpatialPolygonsDataFrame` which allowing us to make maps of the variables in data frame. And finally we can visualize the observed and expected mask-wearing coutns, the SMRs in an interactive map which is constructed in `leaflet` package.
+
+#### 2.4.3 Model
+We evaluate the situation of mask wearing over Canada in both depth and width, by calculating the number of observed mask wearing in each province, the expected count on mask wearing, relative risk and its 95% credible interval. We use spatial model with two random effect modeling spatial residual variation and for modelling unstructured noise for the section research question. According to the created table, we can easily see that we have counted respondents wearing mask in each province as the response variable, so we model it with Poisson distribution. The spatial model is fitted  using `INLA` package.
+
+Let $Yi$ and $Ei$ be the observed and expected number of people wearing mask, respectively, and let $\theta_i$ be the relative risk for province $i = 1,...,13$. The model is specified as follows:
+$$Y_i|\theta_i \sim Poisson(E_i\theta_i), i = 1,...13$$
+$$log(\theta_i) = \beta_0+u_i+v_i$$
+where $\beta_0$ is the intercept, and $u_i$ is a structured spatial effect, $u_i|u_{-i} \sim N(\bar{u_\phi},\frac{1}{\tau_u})$,and $v_i$ is an unstructured spatial effect,$v_i \sim N(0,\frac{1}{\tau_v})$
+
+# 3. Result and discussion
+
+### GLMM 3.1
+
+```{r,echo=F}
+provinceformula <- mask~age+Gender+income+citysize+marriage+
+  jobatrisk+trustgovt+concerns+trustmedia+discuss+f(province, model = 'iid')
+#default prior & random intercept only
+glmm.pro <- inla(provinceformula, data=data,family='binomial',control.predictor = list(link=1))
+knitr::kable(round(exp(glmm.pro$summary.fixed),3), caption = "Table 3.1")
+```
+
+From table 1, we can see that most variables are positively affecting the mask wearing, regardless trustgovt, concerns, trustmedia, discuss. People have higher income are 3.9% more likely to wearing a mask, and people living in a smaller size area are 85.1% less likely wearing a mask. For attitudinal predictors, people who having less concerns about COVID-19 are 71.8 less likely to wearing a mask; people who having more confidence and trust in social media are 13% more likely to wearing a mask. 
+
+```{r, eval=F}
+fitted.pro = glmm.pro$summary.fitted.values[,1]
+data.pro <- cbind(data,fitted.pro)
+mask0.fitted <- data.pro %>% 
+  group_by(mask) %>%
+  filter(mask == 0)
+mask1.fitted <- data.pro %>% 
+  group_by(mask) %>%
+  filter(mask == 1)
+hist(mask0.fitted$fitted.pro,xlab = "predicted probability of wearing mask",main ="predicted value of not wearing mask group",col = 'thistle3')
+lines(density(mask0.fitted$fitted.pro))
+hist(mask1.fitted$fitted.pro,xlab = "predicted probability of wearing mask", main = "predicted value of wearing mask group",col="slategray3")
+lines(density(mask1.fitted$fitted.pro))
+```
+
+```{r, eval=F}
+# creating a new sample size to run GLMM with two random effect
+datasmall <- data[1:10000,]
+provinceformula4 <- mask~age+Gender+income+citysize+marriage+
+  jobatrisk+trustgovt+concerns+trustmedia+discuss+f(respid, model = 'iid',hyper = list(prec = list(prior = "logitbeta", param = c(1,4)))) + f(education, model='iid')
+#default prior & random intercept only
+glmm4 <- inla(provinceformula4, data=datasmall,family='binomial',control.predictor = list(link=1))
+summary(glmm4)
+```
+
+```{r, eval=F}
+fitted = glmm4$summary.fitted.values[,1]
+datasmall <- cbind(datasmall,fitted)
+mask0.fitted <- datasmall %>% 
+  group_by(mask) %>%
+  filter(mask == 0)
+mask1.fitted <- datasmall %>% 
+  group_by(mask) %>%
+  filter(mask == 1)
+hist(mask0.fitted$fitted,xlab = "predicted probability of wearing mask",main ="predicted value of not wearing mask group",col = 'thistle3')
+lines(density(mask0.fitted$fitted))
+hist(mask1.fitted$fitted,xlab = "predicted probability of wearing mask", main = "predicted value of wearing mask group",col="slategray3")
+lines(density(mask1.fitted$fitted))
+```
+
+
+```{r,echo=F}
+bri.hyperpar.summary(glmm.pro)
+#We don't need to transform this interval because the GLM/LINK function thing only affects the linear predictor.
+#The variance parameter has the same interpretation and is on the same scale as the ordinary mixed model
+
+#install.packages("Pmisc", repos="http://R-Forge.R-project.org")
+library(Pmisc)
+Pmisc::priorPostSd(glmm.pro)$posterior %>%
+  as_tibble() %>%
+  ggplot(aes(x = x,y = y)) +
+  theme_light() +
+  geom_line() + 
+  geom_line(aes(y = prior),colour = "red",linetype = "dashed") + 
+  labs(title = "Posterior standard deviation of random effect",
+       subtitle = "Red: prior. Black: posterior",
+       x = "Value",
+       y = "Density")
+```
+
+```{r,echo=F}
+# plot marginal
+plot_marginals <- function(marg,plottitle = "") {
+  # marg is one of the dataframes from nitro_inla$marginals.fixed
+  marg %>%
+    as_tibble() %>%
+    ggplot(aes(x = x,y = y)) +
+    theme_light() + 
+    geom_line() +
+    labs(x = "Value",
+         y = "Marginal Density",
+         title = plottitle)
+}
+# 
+purrr::map2(glmm.pro$marginals.fixed,
+            names(glmm.pro$marginals.fixed),
+            ~plot_marginals(marg = .x,plottitle = .y)) %>%
+  cowplot::plot_grid(plotlist = .,nrow = 3)
+
+# Right from these plots, you can read off
+# the point estimates (posterior means) and
+# the interval estimates (given by the 95% credible intervals).
+# BUT! These are all marginal posteriors for betas.
+# So they are on the LINK scale.
+# You read the estimates off the plots, and then
+# transform back to the natural scale.
+```
+
+According to the above posterior distributions, we see that all distribution concentrated at a single point and there is not so much variance covering zero, therefore, our variables are statistically significant. And we say our model is doing a reasonably good job on modeling reality. Since the problem of logistics regression is that it is not like the simple linear regression, for SLR, we have assumption, the observations are normally distributed around certain mean. And we can plot the residual plot or Normal QQ plot to check assumption. In logistics regression, all we really getting is parameters maximized some likelihood, we don't have the same normality assumption as fitting a standard regression. Instead of doing a model diagnostic, we want to see if our model is doing a reasonably good job of modeling reality and we can check it by looking at the posterior distributions.
+
+
+### Spatial model 3.2
+
+```{r,echo=F}
+#map.shp comes from https://www12.statcan.gc.ca/census-recensement/2011/geo/bound-limit/bound-limit-2011-eng.cfm
+directory <- "~/Desktop/STA490_masks_data_files/data" #change the file directory to run
+sh.directory <- file.path(directory,"gpr_000b11a_e.shp") #you need to manually set this path
+sh <- st_read(sh.directory)
+map <- as_Spatial(sh$geometry, cast = TRUE, IDs = paste0("ID", seq_along(sh$geometry))) 
+library(sp)
+rownames(d) <- c("ID11","ID1","ID7","ID9","ID12","ID10","ID13","ID3","ID8","ID4","ID2","ID5","ID6")
+map <- SpatialPolygonsDataFrame(map, d, match.ID = TRUE)
+head(map@data)
+```
+
+```{r,eval=F}
+# Creating neightbour matrix
+library(spdep)
+library(INLA)
+nb <- poly2nb(map)
+head(nb)
+nb2INLA("map.adj", nb)
+g <- inla.read.graph(filename = "map.adj")
+```
+
+Once the matrix was created. We need to convert the neighborhood's list to the format that can be read by `INLA` by using `nb2INLA()` function. The neighborhood matrix shown above. From the matrix, we can say, for example, the neighbors in are 1 is 6, 10, 11; and the neighbors in area 2 are 3, 8, 9, 12, etc.
+
+```{r,eval=F}
+# Inference using INLA
+map$re_u <- 1:nrow(map@data)
+map$re_v <- 1:nrow(map@data)
+formula <- Y ~f(re_u, model = "besag", graph = g, scale.model = TRUE) + f(re_v, model = "iid")
+res <- inla(formula, family = "poisson", data = map@data, E = E, control.predictor = list(compute = TRUE))
+summary(res)
+```
+
+
+Noted that the priors for two random effects $u_i$ and $v_i$ are default prior in Basag york molle model and guassian prior with mean 0. From the table we see that the intercept $\hat\beta_0 = -0.13$ with 95% credible interval equal to $(-0.236,-0.033)$. I consider the intercept is significant because its 95% credible interval doesn't contain 0. 
+
+```{r,eval=F}
+#add results to map
+head(res$summary.fitted.values)
+map$RR <- res$summary.fitted.values[, "mean"]
+map$LL <- res$summary.fitted.values[, "0.025quant"]
+map$UL <- res$summary.fitted.values[, "0.975quant"]
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+Then we have the mask wearing ratio estimates for each province are given by the posterior and the 95% credible intervals of $n_i$ = 1, ...,13 which in `summary.fitted.values`. I show the estimated SMR in an interactive map using `leaflet` so that we can clearly see where the maps is worn most commonly. 
+
+
+```{r,eval=F}
+library(leaflet)
+pal <- colorNumeric(palette = "YlOrRd", domain = map$RR)
+
+labels <- sprintf("<strong> %s </strong> <br/> Observed: %s <br/> Expected: %s <br/>SMR: %s <br/>RR: %s (%s, %s)",
+                  map$provinces, map$Y,  round(map$E, 2), round(map$SMR, 2),
+                  round(map$RR, 2), round(map$LL, 2), round(map$UL, 2)) %>%
+  lapply(htmltools::HTML)
+
+
+leaflet(map) %>% addTiles() %>%
+    addPolygons(color = "grey", weight = 1, fillColor = ~pal(RR),  fillOpacity = 0.5,
+    highlightOptions = highlightOptions(weight = 4),
+    label = labels,
+    labelOptions = labelOptions(stsyle = list("font-weight" = "normal", padding = "3px 8px"),
+    textsize = "15px", direction = "auto")) %>%
+    addLegend(pal = pal, values = ~RR, opacity = 0.5, title = "RR", position = "bottomright")
+```
+
+\newpage
+
+From the map, we observe that people in eastern Canada having relative more people wearing a mask and northern Canada has a more wearing mask, this may because there are more population and more disease cases in eastern Canada.
+
+#### Conclusion
+
+We instigated in who and where people wearing mask the most common by conducted a generalized linear mixed model and spatial model. For who wearing mask the most common, we ultilize socio-demographic and attitudinal predictors and the model reporting that female.... For where people wearing mask the most common, we utilized the spatial model and found that people living in the Eastern Canada are more likely to wear a mask during the coronavirus pandemic. On the contrary, people living in the western Canada(e.g. Vancouver) are less likely to wear a mask, which government needs to pay more attention on those areas.
+
+In the Generalized linear mixed model, there are repeated measurement sin data so that it is very hard for us to include a random slope since I believe there are different levels among each respondent. 
+In the spatial model, SMRs may be misleading and unreliable when there is a small population or rare diseases. Our model can not incorporate covariates and borrow information from neighboring areas to obtain smoothed relative risks. 
+
